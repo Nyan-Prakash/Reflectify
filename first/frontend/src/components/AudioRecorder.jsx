@@ -13,6 +13,8 @@ function AudioRecorder() {
   const [selectedDevice, setSelectedDevice] = useState('');
   const [recordingTime, setRecordingTime] = useState(0);
   const [audioPreview, setAudioPreview] = useState(null);
+  const [audioURL, setAudioURL] = useState("");
+  const [transcription, setTranscription] = useState("");
   
   const chunksRef = useRef([]);
   const audioStreamRef = useRef(null);
@@ -199,18 +201,34 @@ function AudioRecorder() {
     }
 
     try {
-      setStatus("Uploading recording...");
-      const response = await axios.post("http://localhost:8000/api/entries/upload", formData, {
-        headers: {
-          "Content-Type": "multipart/form-data",
-        },
-      });
-      console.log("Upload response:", response.data);  // Debug log
-      setStatus(`Upload successful! Transcription: ${response.data.transcription}`);
+      console.log("Starting upload...");
+      setStatus("Uploading...");
+
+      console.log("Sending request to server...");
+      const response = await axios.post(
+        "http://localhost:8000/api/entries/upload",
+        formData,
+        {
+          headers: {
+            "Content-Type": "multipart/form-data",
+            "Accept": "application/json",
+          },
+          withCredentials: false,
+          timeout: 30000,
+        }
+      );
+
+      console.log("Server response:", response);
+
+      if (response.data && response.data.status === "success") {
+        setStatus("Upload successful!");
+        setTranscription(response.data.transcription || "No transcription available");
+      } else {
+        setStatus("Upload error: " + (response.data?.message || "Unknown error"));
+      }
     } catch (error) {
-      console.error("Upload error:", error);  // Debug log
-      setError(`Upload failed: ${error.message}`);
-      setStatus("Upload failed");
+      console.error("Upload error details:", error);
+      setStatus("Upload failed: " + (error.response?.data?.message || error.message || "Network Error"));
     }
   };
 
@@ -384,6 +402,21 @@ function AudioRecorder() {
           <li>Watch the level meter to ensure good audio levels</li>
         </ul>
       </div>
+
+      {/* Transcription */}
+      {transcription && (
+        <div style={{
+          marginTop: '2rem',
+          padding: '1rem',
+          backgroundColor: '#f8f9fa',
+          borderRadius: '8px',
+          border: '1px solid #e9ecef',
+          textAlign: 'left'
+        }}>
+          <h3 style={{ marginBottom: '1rem' }}>Transcription</h3>
+          <p>{transcription}</p>
+        </div>
+      )}
 
       <style>
         {`

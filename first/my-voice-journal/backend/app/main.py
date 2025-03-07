@@ -5,7 +5,7 @@ import os
 import json
 from .database import get_db
 from .services.transcription import transcribe_audio
-from .services.nlp import analyze_text
+from .services.nlp import analyze_text, extract_events
 from .services.event_linking import link_events
 from firebase_admin import firestore as admin_firestore
 
@@ -56,6 +56,14 @@ async def upload_audio(file: UploadFile = File(...)):
 
         # Transcribe
         transcription = transcribe_audio(audio_path)
+        
+        # Extract events and analyze sentiment
+        if transcription:
+            analysis = analyze_text(transcription)
+            events = extract_events(transcription)
+        else:
+            analysis = {"sentiment_score": 0, "events": []}
+            events = []
 
         # Only try to save to Firestore if it's initialized
         if db is not None:
@@ -64,8 +72,8 @@ async def upload_audio(file: UploadFile = File(...)):
                 doc_data = {
                     "audio_file_path": audio_path,
                     "transcription": transcription or "No transcription available",
-                    "sentiment_score": 0,
-                    "events_tagged": json.dumps([]),
+                    "sentiment_score": analysis["sentiment_score"],
+                    "events_tagged": link_events("[]", events),
                     "created_at": admin_firestore.SERVER_TIMESTAMP
                 }
                 doc_ref.set(doc_data)
@@ -82,6 +90,7 @@ async def upload_audio(file: UploadFile = File(...)):
             "status": "success",
             "entry_id": entry_id,
             "transcription": transcription,
+            "events": events,
             "message": "Audio uploaded and processed successfully"
         }
 
@@ -104,17 +113,69 @@ def get_timeline():
 @app.get("/api/events/main")
 def get_main_events():
     """
-    Retrieves 'main events' from Firestore.
+    Retrieves main events from Firestore and counts their occurrences.
+    Converts them to a hashable structure for counting, then back to JSON-friendly data.
     """
+
+    def make_hashable(item):
+        """
+        Recursively convert lists and dictionaries to tuples so that the
+        entire structure becomes hashable (so we can use it as a dict key).
+        """
+        if isinstance(item, (list, tuple)):
+            return tuple(make_hashable(e) for e in item)
+        elif isinstance(item, dict):
+            # Sort the items to ensure consistent ordering for the tuple
+            return tuple(sorted((k, make_hashable(v)) for k, v in item.items()))
+        else:
+            return item
+
+    def make_json_friendly(item):
+        """
+        Recursively convert tuples back into lists (and so on),
+        ensuring that the final data is JSON-serializable.
+        """
+        if isinstance(item, tuple):
+            return [make_json_friendly(sub) for sub in item]
+        elif isinstance(item, list):
+            return [make_json_friendly(sub) for sub in item]
+        elif isinstance(item, dict):
+            return {k: make_json_friendly(v) for k, v in item.items()}
+        else:
+            return item
+
     docs = db.collection("voice_entries").stream()
     events_map = {}
 
     for doc in docs:
         data = doc.to_dict()
         if "events_tagged" in data and data["events_tagged"]:
-            event_list = json.loads(data["events_tagged"])
+            try:
+                event_list = json.loads(data["events_tagged"])
+            except Exception as e:
+                print(f"Error parsing events_tagged: {e}")
+                event_list = []
             for ev in event_list:
-                events_map[ev] = events_map.get(ev, 0) + 1
+                # Convert dictionaries to a hashable structure for counting.
+                key = make_hashable(ev)
+                events_map[key] = events_map.get(key, 0) + 1
 
-    main_events = [ev for ev, count in events_map.items() if count > 1]
-    return {"main_events": main_events, "all_events": events_map}
+    # Filter events with multiple occurrences (you can adjust the threshold if needed).
+    main_events = [k for k, count in events_map.items() if count > 1]
+
+    # Convert the "main events" from tuple form back to JSON-friendly form.
+    main_events_readable = [make_json_friendly(m) for m in main_events]
+
+    # Convert *all* keys in events_map to JSON strings (so the front-end can parse them).
+    events_map_readable = {}
+    for key, count in events_map.items():
+        # key might be a nested tuple/dict structure, so convert it first.
+        json_friendly_key = make_json_friendly(key)
+        # Then turn it into a JSON string (which the frontend can parse).
+        key_str = json.dumps(json_friendly_key)
+        events_map_readable[key_str] = count
+
+    return {
+        "main_events": main_events_readable,
+        "all_events": events_map_readable
+    }
